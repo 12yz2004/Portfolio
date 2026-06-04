@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Hidden Forest - Project 1</title>
+
+    <script id="vertex-shader" type="x-shader/x-vertex">
+        attribute vec4 vPosition; //position of vertex from points[]
+        attribute vec3 vColor; //color of vertex
+        attribute vec3 vNormal; 
+        attribute float vEmissive;
+
+        uniform mat4 modelViewMatrix; //transformation matrix 
+        uniform mat4 projectionMatrix; //for perspective
+
+        varying vec3 fColor;
+        varying vec3 fViewNormal;
+        varying vec3 fWorldNormal;
+        varying vec3 fPosition; 
+        varying vec3 fWorldPos; //world position for noise
+        varying float fEmissive;
+        varying float fHeight;
+        varying vec3 fFlatNormal;
+
+        void main() {
+            vec4 pos = modelViewMatrix * vPosition;
+
+            //storing original positions
+            fPosition = pos.xyz;
+            fWorldPos = vPosition.xyz; 
+            fHeight = vPosition.y; 
+
+            //normal transformations
+            fViewNormal = normalize(mat3(modelViewMatrix) * vNormal);
+            fWorldNormal = normalize(vNormal); //storing og norm
+            fFlatNormal = vNormal; 
+
+            fColor = vColor;
+            fEmissive = vEmissive;
+            gl_Position = projectionMatrix * pos;
+        }
+    </script>
+
+    <script id="fragment-shader" type="x-shader/x-fragment">
+        precision mediump float;
+        
+        uniform int uShadingMode;
+        varying vec3 fFlatNormal;
+
+        varying vec3 fColor;
+        varying vec3 fViewNormal;
+        varying vec3 fWorldNormal;
+        varying vec3 fPosition;
+        varying vec3 fWorldPos;
+        varying float fEmissive;
+        varying float fHeight;
+
+        uniform float fogDensity;
+
+        uniform vec3  uLightDir;
+
+        //different sun shades
+        uniform vec3  uSunTintHigh;   
+        uniform vec3  uSunTintMid;    
+        uniform vec3  uSunTintShadow; 
+
+        uniform vec3  uAmbientColor;
+        uniform vec3  uFogColor;
+
+        //fog strength
+        uniform float uFogA;
+        uniform float uFogB;
+        uniform float uDarkness; //overall scene brightness multiplier
+        uniform float uShadowDepth; //how dark shadows gets
+
+        //Noise functions
+        float hash(vec2 p) {
+            return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+        float smoothNoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            float a = hash(i);
+            float b = hash(i + vec2(1.0, 0.0));
+            float c = hash(i + vec2(0.0, 1.0));
+            float d = hash(i + vec2(1.0, 1.0));
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
+
+        void main() {
+        if (uShadingMode == 0) {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+
+        vec3 L = normalize(uLightDir);
+
+        vec3 Nworld = (uShadingMode == 1)
+            ? normalize(fFlatNormal)
+            : normalize(fWorldNormal);
+
+        float NdL = max(dot(Nworld, L), 0.0);
+
+        vec3 color;
+
+        if (uShadingMode == 2) {
+            // Blinn-Phong
+            vec3 V = normalize(-fPosition); //view vector
+            vec3 H = normalize(L + V); //halfway vector between light and view
+
+            float diff = NdL;
+
+            float specPower = 32.0; //higher the spec power shinier it is
+            float spec = pow(max(dot(Nworld, H), 0.0), specPower);
+
+            //Keep specular subtle and colour-tinted so it doesn't blow out
+            vec3 specular = fColor * 0.15 * spec;
+
+            // Shadow faces pick up uSunTintShadow so they stay hue-correct instead
+            // of going grey-blue from a raw ambient colour multiply.
+            float shadowBlend = 1.0 - diff;
+            vec3 litTint    = mix(uSunTintMid, uSunTintHigh, diff);
+            vec3 shadowTint = uSunTintShadow;
+            vec3 finalTint  = mix(litTint, shadowTint, shadowBlend * 0.6);
+
+            vec3 ambient = fColor * uAmbientColor * 0.45;
+            vec3 diffuse = fColor * finalTint * max(diff, uShadowDepth);
+
+            color = ambient + diffuse + specular;
+
+            //Soft ambient occlusion based on normal orientation
+            float ao = clamp(0.78 + 0.22 * Nworld.y, 0.0, 1.0);
+            color *= ao;
+        } 
+         else {
+
+            float dapple = smoothNoise(fWorldPos.xz * 0.8) * 0.6
+                        + smoothNoise(fWorldPos.xz * 2.1) * 0.4; //2d noise generation
+            dapple = smoothstep(0.38, 0.72, dapple); //reducing harshness
+
+            float litNdL = NdL + dapple * 0.35 * step(0.0, NdL);
+
+            float t = smoothstep(0.0, 1.0, litNdL);
+            vec3 sunTint = mix(
+                uSunTintShadow,
+                mix(uSunTintMid, uSunTintHigh, t),
+                t
+            );
+
+            float diffuse = mix(uShadowDepth, 1.0, t);
+
+            vec3 ambient = fColor * uAmbientColor * 0.4;
+            color = fColor * sunTint * diffuse;
+
+            float shadowMask = 1.0 - smoothstep(-0.05, 0.25, NdL);
+            color = mix(color, color + ambient, shadowMask * 0.5);
+        }
+
+        color *= uDarkness;
+        
+        if (fEmissive > 0.01) {
+            color = fColor * 2.2 * uDarkness;
+        }
+
+
+        //fog
+        float dist = length(fPosition);
+        float fogFactor = exp(-uFogA * dist * dist - uFogB * dist);
+        fogFactor = clamp(fogFactor, 0.0, 1.0);
+
+        color = mix(uFogColor, color, fogFactor);
+
+        gl_FragColor = vec4(color, 1.0);
+    }
+    </script>
+
+    <style>
+        body { margin: 0; background: #1a2a2a; text-align: center; color: white; font-family: sans-serif; }
+        #controls { display: inline-block; margin-top: 10px; text-align: left; background: rgba(0,0,0,0.45); border-radius: 8px; padding: 12px 18px; font-size: 13px; max-width: 760px; width: 100%; box-sizing: border-box; }
+        .ctrl-row { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-bottom: 8px; align-items: center; }
+        .ctrl-group { display: flex; align-items: center; gap: 6px; }
+        .ctrl-group label { color: #aac; min-width: 44px; }
+        .ctrl-group input[type=range] { width: 110px; }
+        .ctrl-group span { color: #eee; min-width: 40px; font-size: 12px; }
+        .divider { border: none; border-top: 1px solid rgba(255,255,255,0.1); margin: 6px 0; }
+        .hint { color: #99b; font-size: 12px; }
+        button { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.25); color: white; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+        button:hover { background: rgba(255,255,255,0.2); }
+    </style>
+    <script type="text/javascript" src="webgl-utils.js"></script>
+    <script type="text/javascript" src="initShaders.js"></script>
+    <script type="text/javascript" src="common.js"></script>
+    <script type="text/javascript" src="objects.js"></script>
+    <script type="text/javascript" src="forest.js"></script>
+</head>
+<body>
+
+<canvas id="gl-canvas" width="1200" height="600"></canvas>
+
+<div id="controls">
+    <div class="ctrl-row">
+        <strong style="color:#cce; font-size:13px;">Shading:</strong>
+        <button onclick="setShading(0)">Wireframe</button>
+        <button onclick="setShading(1)">Flat</button>
+        <button onclick="setShading(2)">Smooth</button>
+        &nbsp;&nbsp;
+        <strong style="color:#cce; font-size:13px;">Lighting:</strong>
+        <button onclick="setPreset('daytime')">Day</button>
+        <button onclick="setPreset('goldenHour')">Golden</button>
+        <button onclick="setPreset('sunrise')">Sunrise</button>
+        <button onclick="setPreset('sunset')">Sunset</button>
+        <button onclick="setPreset('blueHour')">Blue</button>
+        <button onclick="setPreset('nighttime')">Night</button>
+    </div>
+    <hr class="divider">
+    <div class="ctrl-row">
+        <strong style="color:#cce; font-size:13px;">View Bounds:</strong>
+        <div class="ctrl-group">
+            <label>FOV</label>
+            <input type="range" min="30" max="120" value="75" step="1" oninput="setFOV(this.value)">
+            <span id="fov-val">75°</span>
+        </div>
+        <div class="ctrl-group">
+            <label>Near</label>
+            <input type="range" min="0.01" max="2.0" value="0.1" step="0.01" oninput="setNear(this.value)">
+            <span id="near-val">0.10</span>
+        </div>
+        <div class="ctrl-group">
+            <label>Far</label>
+            <input type="range" min="20" max="500" value="100" step="5" oninput="setFar(this.value)">
+            <span id="far-val">100</span>
+        </div>
+        <div class="ctrl-group">
+            <label>Speed</label>
+            <input type="range" min="0.1" max="5.0" value="1.0" step="0.1" oninput="setMoveSpeed(this.value)">
+            <span id="speed-val">1.0x</span>
+        </div>
+    </div>
+    <hr class="divider">
+    <div class="hint">
+        <b style="color:#cce">Move:</b> WASD &nbsp;|&nbsp; <b style="color:#cce">Look:</b> Arrow keys &nbsp;|&nbsp;
+        <b style="color:#cce">Roll:</b> Q / E &nbsp;|&nbsp; <b style="color:#cce">Up/Down:</b> Space / LCtrl
+    </div>
+</div>
+
+</body>
+</html>
